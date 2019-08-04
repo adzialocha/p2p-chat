@@ -2,13 +2,16 @@
 
 mod crypto;
 mod discovery;
+mod log;
+mod ui;
 
 use std::collections::HashMap;
 
-use futures::{Async, Future, Stream};
+use futures::{Future, Stream};
 use tokio_core::reactor::{Core, Handle};
 
 use discovery::{DiscoveryStream, DiscoveryPeer};
+use ui::{UserInterface, ChatMessage};
 
 const DISCOVERY_NAME: &[u8] = b"p2p-chat";
 const URL_PROTOCOL: &str = "chat://";
@@ -17,6 +20,15 @@ pub fn run(
     handle: Handle,
     public_key: &[u8],
 ) -> impl Future<Item = (), Error = ()> {
+    // Create user interface
+    let (ui, ui_tx) = UserInterface::new().expect("Failed to initialize the UI");
+
+    // Show channel address to the user
+    ui_tx.unbounded_send(
+        ChatMessage::from_string(
+            format!("{}{}", URL_PROTOCOL, hex::encode(public_key))
+        )).unwrap();
+
     // @TODO Get correct port from listening TCP socket
     let port = 12345;
 
@@ -25,18 +37,23 @@ pub fn run(
     let discovery_stream = DiscoveryStream::new(handle.clone(), &discovery_key.as_bytes(), port);
 
     let handle_clone = handle.clone();
+    let ui_tx_clone = ui_tx.clone();
+
     let mut peers: HashMap<String, DiscoveryPeer> = HashMap::new();
 
     let discovery_future = discovery_stream.map(move |stream| {
         let find_peers = stream.for_each(move |peer| {
             if !peers.contains_key(&peer.token()) {
                 // @TODO Start replication protocol
-                println!(
+                let message = format!(
                     "New peer: {}, {}, {}",
                     peer.addr(),
                     peer.port(),
                     peer.token()
                 );
+
+                ui_tx_clone.unbounded_send(
+                    ChatMessage::from_string(message)).unwrap();
 
                 peers.insert(peer.token(), peer);
             }
@@ -52,8 +69,10 @@ pub fn run(
 
     handle.spawn(discovery_future);
 
-    // Never end this future
-    futures::future::poll_fn(|| Ok(Async::NotReady))
+    ui.for_each(move |text| {
+        ui_tx.unbounded_send(ChatMessage::new(String::from("ME"), text)).unwrap();
+        Ok(())
+    }).map_err(|e| panic!("UI exited with error: {:?}", e)).then(|_| Ok(()))
 }
 
 fn main() {
@@ -84,8 +103,6 @@ fn main() {
     } else {
         keypair.public.as_bytes()
     };
-
-    println!("{}{}", URL_PROTOCOL, hex::encode(public_key));
 
     // Create event loop to drive the networking I/O
     let mut core = Core::new().unwrap();
